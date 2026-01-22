@@ -2,106 +2,116 @@ import streamlit as st
 import pandas as pd
 import requests
 from io import StringIO
-import random
 import time
 
-# 設定網頁標題與配置
+# 設定網頁配置
 st.set_page_config(page_title="富邦產險 | 財報分析助理", page_icon="🛡️", layout="wide")
 
-# --- 1. 核心功能：抓取股票清單 (從證交所) ---
+# --- 1. 核心功能：抓取股票清單 (強化防封鎖) ---
 @st.cache_data(ttl=3600)
 def get_stock_list():
-    # 增加模擬標頭以提高存取證交所的成功率
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
-    urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
+    urls = [
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", 
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
+    ]
     stock_dict = {}
     for url in urls:
         try:
             res = requests.get(url, headers=headers, timeout=10)
             res.encoding = 'big5'
+            # 影片重點：使用 pandas 解析 HTML
             df = pd.read_html(StringIO(res.text))[0]
             df.columns = df.iloc[0]
             df = df.iloc[1:]
             for item in df['有價證券代號及名稱'].dropna():
                 if '　' in item:
                     code, name = item.split('　')
-                    if len(code) == 4: stock_dict[f"{code} {name}"] = code
-        except Exception: continue
+                    if len(code) == 4:
+                        stock_dict[f"{code} {name}"] = code
+        except:
+            continue
     return stock_dict
 
-# --- 2. 核心功能：爬取 Goodinfo (強化防封鎖版) ---
-def fetch_goodinfo_data(stock_id):
-    url = f"https://goodinfo.com.tw/tw/StockFinancialPerformance.asp?STOCK_ID={stock_id}"
-    
-    # 影片與實務重點：Goodinfo 對 Headers 檢核極嚴，必須包含 Referer 與合理的 Cookie
+# --- 2. 核心功能：爬取官方 MOPS 數據 (高穩定度方案) ---
+def fetch_mops_financials(stock_id, year, season):
+    # 使用 ajax 接口獲取綜合損益表
+    url = 'https://mops.twse.com.tw/mops/web/ajax_t164sb04'
+    payload = {
+        'step': '1', 'firstin': '1', 'off': '1', 'queryName': 'co_id',
+        'inpuType': 'co_id', 'TYPEK': 'all', 'isnew': 'false',
+        'co_id': stock_id, 'year': year, 'season': season
+    }
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'referer': 'https://goodinfo.com.tw/tw/index.asp',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://mops.twse.com.tw/mops/web/t164sb04'
     }
 
     try:
-        # 建立一個 Session 來維持連線狀態，有助於通過部分檢查
-        session = requests.Session()
-        # 先存取首頁獲取基本 Cookie
-        session.get("https://goodinfo.com.tw/tw/index.asp", headers=headers, timeout=10)
-        
-        # 增加一個隨機延遲，模擬真人操作行為
-        time.sleep(random.uniform(1, 3))
-        
-        res = session.get(url, headers=headers, timeout=15)
+        res = requests.post(url, data=payload, headers=headers, timeout=15)
         res.encoding = 'utf-8'
-        
-        # 檢查是否被轉向到驗證碼頁面或返回空資料
-        if "請稍候" in res.text or "異常存取" in res.text:
-            return "BLOCK"
-            
+        # 尋找目標表格
         dfs = pd.read_html(StringIO(res.text))
         for df in dfs:
-            if '年度' in df.columns.get_level_values(0):
-                df.columns = df.columns.get_level_values(df.columns.nlevels - 1)
-                return df
+            if '會計項目' in df.columns.get_level_values(0):
+                df.columns = df.columns.get_level_values(0)
+                return df[['會計項目', '金額']].dropna()
         return None
-    except Exception as e:
+    except:
         return None
 
 # --- 3. UI 介面 ---
 st.title("🛡️ 富邦產險 - 企業財報分析助理")
-st.info("本工具協助同仁快速調閱數據。若出現頻率限制，請等待 1 分鐘後再試。")
+st.markdown("本系統已優化連線穩定度，直接對接公開資訊觀測站官方數據。")
 
 all_stocks = get_stock_list()
 target_id = None
 
-# 侧邊欄設置
 with st.sidebar:
     st.header("🔍 查詢設定")
     if not all_stocks:
-        st.warning("⚠️ 無法獲取股票清單，請手動輸入")
-        target_id = st.text_input("輸入股票代碼 (例: 2330)")
+        st.error("⚠️ 自動清單獲取失敗，請手動輸入")
+        target_id = st.text_input("輸入股票代碼 (如: 2330)")
     else:
         options = ["--- 請選擇公司 ---"] + list(all_stocks.keys())
         selected_stock = st.selectbox("公司名稱/代碼", options=options)
         if selected_stock != "--- 請選擇公司 ---":
             target_id = all_stocks[selected_stock]
 
-    search_btn = st.button("🚀 開始分析", disabled=(target_id is None))
+    year = st.selectbox("年份 (民國)", ["113", "112", "111", "110"])
+    season = st.selectbox("季度", ["03", "02", "01", "04"])
+    
+    search_btn = st.button("🚀 執行爬取", disabled=(target_id is None))
 
-# 執行邏輯
 if search_btn:
-    with st.spinner(f'正在分析 {target_id} 的財報趨勢...'):
-        df_result = fetch_goodinfo_data(target_id)
+    with st.spinner(f'正在調閱 {target_id} 的官方財報...'):
+        # 增加短暫延遲避免被視為攻擊
+        time.sleep(1)
+        df_result = fetch_mops_financials(target_id, year, season)
         
-        if isinstance(df_result, pd.DataFrame):
-            st.success(f"✅ 已獲取 {target_id} 數據")
-            st.dataframe(df_result, use_container_width=True, height=600)
+        if df_result is not None:
+            st.success(f"✅ 成功獲取 {target_id} {year}Q{season} 數據")
+            
+            # 關鍵指標卡
+            st.subheader("📊 關鍵科目分析")
+            metrics = ["營業收入合計", "營業利益（損失）", "本期淨利（淨損）", "基本每股盈餘"]
+            summary = df_result[df_result['會計項目'].str.strip().isin(metrics)]
+            
+            if not summary.empty:
+                cols = st.columns(len(summary))
+                for i, row in enumerate(summary.itertuples()):
+                    cols[i].metric(row.會計項目, row.金額)
+            
+            st.divider()
+            st.subheader("📄 損益表完整數據")
+            st.dataframe(df_result, use_container_width=True, height=500)
+            
             csv = df_result.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 下載報表 (CSV)", csv, f"{target_id}_report.csv")
-        elif df_result == "BLOCK":
-            st.error("🚨 抓取失敗：Goodinfo 網站偵測到異常存取。請同仁稍等 1-2 分鐘，或更換查詢的公司。")
+            st.download_button("📥 下載此報表 (CSV)", csv, f"{target_id}_financial.csv")
         else:
-            st.error("❌ 查無資料或網站結構變動。")
+            st.error("❌ 查無資料。提醒：113年第4季數據通常在隔年3月底後才公佈。")
+
+st.markdown("---")
+st.caption("數據來源：公開資訊觀測站 (MOPS)。建議查詢 112年 Q1~Q3 進行測試。")
