@@ -1,106 +1,94 @@
 import streamlit as st
 import pandas as pd
-import requests
-from io import StringIO
-import time
+from supabase import create_client
+import os
+
+# =============================================================================
+# 🛡️ 富邦產險 - 雲端財報助理 (Supabase 版)
+# =============================================================================
 
 # 設定網頁配置
-st.set_page_config(page_title="富邦產險 | 財報分析助理", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="富邦產險 | 雲端財報助理", page_icon="🛡️", layout="wide")
 
-# --- 1. 抓取股票清單 (強化穩定度) ---
-@st.cache_data(ttl=3600)
-def get_stock_list():
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-    urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
-    stock_dict = {}
-    for url in urls:
-        try:
-            res = requests.get(url, headers=headers, timeout=10)
-            res.encoding = 'big5' # 證交所清單編碼
-            df = pd.read_html(StringIO(res.text))[0]
-            df.columns = df.iloc[0]
-            df = df.iloc[1:]
-            for item in df['有價證券代號及名稱'].dropna():
-                if '　' in item:
-                    code, name = item.split('　')
-                    if len(code) == 4: stock_dict[f"{code} {name}"] = code
-        except: continue
-    return stock_dict
+# --- 1. Supabase 連線設定 ---
+# 密碼外面需要有引號 ""
+SUPABASE_URL = "https://你的ProjectRef.supabase.co" 
+SUPABASE_KEY = "你的ServiceRoleKey" 
 
-# --- 2. 爬取 MOPS 財報數據 (參考影片之 Headers 偽裝) ---
-def fetch_mops_data(stock_id, year, season):
-    url = 'https://mops.twse.com.tw/mops/web/ajax_t164sb04'
-    payload = {
-        'step': '1', 'firstin': '1', 'off': '1', 'queryName': 'co_id',
-        'inpuType': 'co_id', 'TYPEK': 'all', 'isnew': 'false',
-        'co_id': stock_id, 'year': str(year), 'season': str(season)
-    }
-    # 影片重點：模擬真實瀏覽器行為
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://mops.twse.com.tw/mops/web/t164sb04'
-    }
-
+@st.cache_resource
+def init_connection():
     try:
-        res = requests.post(url, data=payload, headers=headers, timeout=15)
-        res.encoding = 'utf-8'
-        # 尋找包含「會計項目」的表格
-        dfs = pd.read_html(StringIO(res.text))
-        for df in dfs:
-            if '會計項目' in df.columns.get_level_values(0):
-                df.columns = df.columns.get_level_values(0)
-                return df[['會計項目', '金額']].dropna()
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception as e:
+        st.error(f"❌ Supabase 連線失敗: {e}")
         return None
-    except: return None
 
-# --- 3. UI 介面 ---
-st.title("🛡️ 富邦產險 - 企業財報分析助理")
-st.info("本工具協助同仁快速調閱官方財報數據。數據來源：公開資訊觀測站 (MOPS)。")
+supabase = init_connection()
 
-# 側邊欄設定
-st.sidebar.title("🔍 查詢設定")
-all_stocks = get_stock_list()
-
-# 防呆邏輯
-target_id = None
-if not all_stocks:
-    st.sidebar.warning("⚠️ 無法獲取股票清單，請改用手動輸入")
-    target_id = st.sidebar.text_input("輸入股票代碼 (例: 2330)")
-else:
-    options = ["--- 請選擇公司 ---"] + list(all_stocks.keys())
-    selected_stock = st.sidebar.selectbox("公司名稱/代碼", options=options)
-    if selected_stock != "--- 請選擇公司 ---":
-        target_id = all_stocks[selected_stock]
-
-# 年份與季度
-year = st.sidebar.selectbox("年份 (民國)", ["113", "112", "111", "110"], index=1) # 預設 112 年較穩定
-season = st.sidebar.selectbox("季度", ["01", "02", "03", "04"], index=2) # 預設 Q3
-
-if st.sidebar.button("🚀 執行爬取") and target_id:
-    with st.spinner(f'正在分析 {target_id} 數據...'):
-        # 增加一秒延遲模擬真人操作
-        time.sleep(1)
-        df_result = fetch_mops_data(target_id, year, season)
+# --- 2. 核心功能：從雲端檢索財報 ---
+def get_financial_report(stock_name):
+    try:
+        # 這裡假設您的 Table 名稱為 'financial_reports'
+        # 使用 ilike 進行公司名稱模糊搜尋
+        query = supabase.table("financial_reports") \
+            .select("*") \
+            .ilike("company_name", f"%{stock_name}%") \
+            .order("year", desc=True) \
+            .order("season", desc=True) \
+            .execute()
         
-        if df_result is not None:
-            st.success(f"✅ 已成功調閱 {target_id} {year}Q{season} 數據")
+        return pd.DataFrame(query.data)
+    except Exception as e:
+        st.error(f"⚠️ 讀取雲端資料失敗: {e}")
+        return pd.DataFrame()
+
+# --- 3. UI 介面設計 ---
+st.title("🛡️ 富邦產險 - 企業財報診斷工具")
+st.markdown("本工具對接 **Supabase 雲端資料庫**，提供同仁檢視已爬取的企業財報結構與數據。")
+
+# 側邊欄查詢
+with st.sidebar:
+    st.header("🔍 查詢設定")
+    search_query = st.text_input("請輸入公司名稱 (例如: 富邦金, 台積電)", placeholder="輸入關鍵字...")
+    search_btn = st.button("🚀 執行檢索")
+
+if search_btn and search_query:
+    with st.spinner(f'正在從雲端調閱 {search_query} 的資料...'):
+        df = get_financial_report(search_query)
+        
+        if not df.empty:
+            st.success(f"📋 已找到與「{search_query}」相關的資料，共 {len(df)} 筆。")
             
-            # 關鍵數據呈現
-            st.subheader("📊 關鍵會計項目摘要")
-            key_metrics = ["營業收入合計", "營業利益（損失）", "本期淨利（淨損）", "基本每股盈餘"]
-            summary = df_result[df_result['會計項目'].str.strip().isin(key_metrics)]
-            
-            if not summary.empty:
-                cols = st.columns(len(summary))
-                for i, row in enumerate(summary.itertuples()):
-                    cols[i].metric(row.會計項目, f"{row.金額}")
-            
+            # --- 診斷功能：檢視資料表結構 ---
+            st.subheader("📁 資料表結構診斷")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**欄位清單：**")
+                st.write(list(df.columns))
+            with col2:
+                st.write("**資料型別概況：**")
+                st.write(df.dtypes.astype(str))
+
+            # --- 抽樣驗證 ---
             st.divider()
-            st.subheader("📄 原始損益表數據")
-            st.dataframe(df_result, use_container_width=True, height=500)
+            st.subheader("🧪 隨機抽樣驗證 (Random Sample)")
+            sample_size = min(3, len(df))
+            st.dataframe(df.sample(sample_size), use_container_width=True)
+
+            # --- 完整數據匯出 ---
+            st.divider()
+            st.subheader("📄 完整歷年財報數據")
+            st.dataframe(df, use_container_width=True)
             
-            # 提供 CSV 下載
-            csv = df_result.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 下載此報表 (CSV)", csv, f"{target_id}_report.csv", "text/csv")
+            csv = df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button("📥 下載此報表 (CSV)", csv, f"{search_query}_cloud_report.csv", "text/csv")
+            
         else:
-            st.error(f"❌ 查無資料。提醒：{year}年第{season}季數據可能尚未上傳或該公司不適用此表。")
+            st.warning(f"📭 雲端資料庫中目前查無「{search_query}」的紀錄。")
+            st.info("💡 提示：請確認爬蟲腳本是否已將資料成功寫入 Supabase。")
+
+elif not search_query:
+    st.info("👈 請在左側輸入公司名稱開始診斷資料。")
+
+st.markdown("---")
+st.caption("🔒 安全聲明：本工具使用 Service Role Key 進行唯讀/寫入操作，請確保 API Key 不外流。")
