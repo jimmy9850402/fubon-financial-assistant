@@ -8,7 +8,7 @@ import google.generativeai as genai
 st.set_page_config(page_title="富邦產險 | 企業財報核保助手", layout="wide")
 
 # 請替換為您新申請的 API Key
-GEMINI_API_KEY = "您的新_GEMINI_API_KEY"
+GEMINI_API_KEY = "AIzaSyC9dlxv5uwRtlAxmTeJKBEDCtAMKlA-iXw"
 SUPABASE_URL = "https://cemnzictjgunjyktrruc.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlbW56aWN0amd1bmp5a3RycnVjIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTA1MTU2MSwiZXhwIjoyMDg0NjI3NTYxfQ.LScr9qrJV7EcjTxp_f47r6-PLMsxz-mJTTblL4ZTmbs"
 
