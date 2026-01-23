@@ -1,108 +1,92 @@
 import streamlit as st
-import pandas as pd
-import yfinance as yf
+import google.generativeai as genai
 from supabase import create_client
+import pandas as pd
 
-# --- 1. 基礎連線設定 ---
-st.set_page_config(page_title="富邦產險 | 企業財報核保助手", layout="wide")
-
+# --- 1. 基礎設定 (請替換為您的實際連線資訊) ---
 SUPABASE_URL = "https://cemnzictjgunjyktrruc.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlbW56aWN0amd1bmp5a3RycnVjIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTA1MTU2MSwiZXhwIjoyMDg0NjI3NTYxfQ.LScr9qrJV7EcjTxp_f47r6-PLMsxz-mJTTblL4ZTmbs"
+SUPABASE_KEY = "您的_SUPABASE_ANON_KEY" # 請填入您的 Supabase Key
+GEMINI_API_KEY = "AIzaSyB2BKcuYjsr7LWhv9JTQcqOM-LvVKFEEVQ"
+
+# 初始化客戶端
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- 2. 輔助工具函數 ---
-def safe_get(df, index_name, col_name):
-    """安全取得數據，避免欄位缺失導致報錯"""
-    try:
-        if index_name in df.index:
-            val = df.loc[index_name, col_name]
-            return val if pd.notna(val) else 0
-        return 0
-    except: return 0
+# --- 2. 功能函式定義 ---
 
-def find_stock_code(query):
-    """從資料庫 stock_isin_list 搜尋名稱對應的代碼"""
-    # 如果輸入是純數字代碼 (例如 2330)，直接回傳
-    if query.isdigit():
-        return f"{query}.TW"
+def get_ai_analysis(company_name):
+    """從 Supabase 抓取數據並由 Gemini 進行 D&O 風險評估"""
+    # 使用 ilike 確保查詢靈活性，避免之前的 400 錯誤
+    result = supabase.table("agent_financial_cache") \
+        .select("*") \
+        .ilike("company_name", f"%{company_name}%") \
+        .order("period", descending=True) \
+        .limit(1) \
+        .execute()
+
+    if not result.data:
+        return None, "❌ 查無快取數據，請先執行數據同步。"
+
+    data = result.data[0]
     
-    # 否則到雲端資料庫搜尋名稱
-    try:
-        # 支援模糊查詢 (包含輸入的關鍵字)
-        res = supabase.table("stock_isin_list").select("code, name").ilike("name", f"%{query}%").execute()
-        if res.data:
-            # 如果找到多個，取第一個或完全匹配的項目
-            for item in res.data:
-                if item['name'] == query:
-                    return f"{item['code']}.TW"
-            return f"{res.data[0]['code']}.TW"
-    except Exception as e:
-        st.error(f"資料庫查詢異常: {e}")
-    return None
+    # 建立給 Gemini 的專業 Prompt
+    prompt = f"""
+    你是一位富邦產險的 D&O (董監事責任險) 核保專家。
+    請針對以下財務數據進行風險評估：
+    - 公司名稱：{data['company_name']}
+    - 財報期間：{data['period']}
+    - 負債比率：{data['debt_ratio']}% (核保預警線為 65%)
+    - 營業活動現金流：{data['net_cash_flow']}
+    - 總資產：{data['total_assets']}
 
-def fetch_analysis_report(symbol):
-    """執行 5 季 + 2 年的財報抓取"""
-    try:
-        ticker = yf.Ticker(symbol)
-        q_inc, q_bal, q_cf = ticker.quarterly_financials, ticker.quarterly_balance_sheet, ticker.quarterly_cashflow
-        fy_inc, fy_bal, fy_cf = ticker.financials, ticker.balance_sheet, ticker.cashflow
+    分析要求：
+    1. 評估負債比是否健康。
+    2. 根據現金流判斷經營穩定性。
+    3. 給予最終核保建議（例如：建議承保、需進一步照會或拒保）。
+    """
 
-        if q_inc.empty: return None
+    response = model.generate_content(prompt)
+    return data, response.text
 
-        metrics = ["營業收入", "總資產", "負債比", "流動資產", "流動負債", "營業活動淨現金流"]
-        result_df = pd.DataFrame({"項目": metrics})
+# --- 3. Streamlit 網頁介面 ---
 
-        # A. 處理最新 5 個季度
-        for col in q_inc.columns[:5]:
-            label = f"{col.year}-Q{((col.month-1)//3)+1}"
-            rev = safe_get(q_inc, "Total Revenue", col)
-            assets = safe_get(q_bal, "Total Assets", col)
-            liab = safe_get(q_bal, "Total Liabilities Net Minority Interest", col)
-            if liab == 0: liab = safe_get(q_bal, "Total Liab", col)
-            c_assets, c_liab = safe_get(q_bal, "Current Assets", col), safe_get(q_bal, "Current Liabilities", col)
-            ocf = safe_get(q_cf, "Operating Cash Flow", col)
-            d_ratio = f"{(liab/assets)*100:.2f}%" if assets > 0 else "N/A"
-            result_df[label] = [f"{rev:,.0f}", f"{assets:,.0f}", d_ratio, f"{c_assets:,.0f}", f"{c_liab:,.0f}", f"{ocf:,.0f}"]
+st.set_page_config(page_title="富邦產險 - D&O 財報核保助理", layout="wide")
+st.title("📋 D&O 財報自動化與 AI 核保系統")
 
-        # B. 處理最新 2 個年度 (FY)
-        for col in fy_inc.columns[:2]:
-            label = f"{col.year} (FY)"
-            rev = safe_get(fy_inc, "Total Revenue", col)
-            assets = safe_get(fy_bal, "Total Assets", col)
-            liab = safe_get(fy_bal, "Total Liabilities Net Minority Interest", col)
-            if liab == 0: liab = safe_get(fy_bal, "Total Liab", col)
-            c_assets, c_liab = safe_get(fy_bal, "Current Assets", col), safe_get(fy_bal, "Current Liabilities", col)
-            ocf = safe_get(fy_cf, "Operating Cash Flow", col)
-            d_ratio = f"{(liab/assets)*100:.2f}%" if assets > 0 else "N/A"
-            result_df[label] = [f"{rev:,.0f}", f"{assets:,.0f}", d_ratio, f"{c_assets:,.0f}", f"{c_liab:,.0f}", f"{ocf:,.0f}"]
-        return result_df
-    except: return None
-
-# --- 3. UI 介面設計 ---
-st.title("🛡️ 富邦產險 - 企業財報核保助手")
-st.markdown("輸入 **公司名稱** (例: 旺宏) 或 **股票代碼** (例: 2330) 即可產出對照表。")
-
+# 側邊欄：顯示目前資料庫狀態
 with st.sidebar:
-    st.header("🔍 數據檢索")
-    user_query = st.text_input("輸入名稱或代碼", value="旺宏")
-    search_btn = st.button("🚀 生成核保報告")
+    st.header("數據管理")
+    if st.button("查看目前快取列表"):
+        cache_data = supabase.table("agent_financial_cache").select("company_name, period, debt_ratio").execute()
+        st.write(pd.DataFrame(cache_data.data))
 
-if search_btn and user_query:
-    with st.spinner(f"正在比對資料庫並分析 '{user_query}' 數據..."):
-        # 步驟 1: 找出代碼
-        target_symbol = find_stock_code(user_query)
-        
-        if target_symbol:
-            # 步驟 2: 抓取財報
-            report = fetch_analysis_report(target_symbol)
-            if report is not None:
-                st.success(f"✅ 已識別標的: {user_query} ({target_symbol})")
-                st.dataframe(report, use_container_width=True)
+# 主要區塊：AI 診斷
+st.subheader("🤖 AI 核保助理診斷")
+target_comp = st.text_input("輸入公司名稱 (例如：旺宏)", placeholder="請輸入公司名稱...")
+
+if st.button("執行 AI 風險評估"):
+    if target_comp:
+        with st.spinner(f"正在檢索 {target_comp} 的最新財報並進行 AI 分析..."):
+            raw_data, analysis = get_ai_analysis(target_comp)
+            
+            if raw_data:
+                # 顯示抓取到的真實數據
+                st.success(f"已讀取 {raw_data['company_name']} ({raw_data['period']}) 數據")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("負債比率", f"{raw_data['debt_ratio']}%")
+                col2.metric("現金流", f"{raw_data['net_cash_flow']:,}")
+                col3.metric("總資產", f"{raw_data['total_assets']:,}")
                 
-                # 下載功能
-                csv = report.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 下載此報表", csv, f"{user_query}_report.csv")
+                # 顯示 AI 評估報告
+                st.markdown("---")
+                st.markdown("### 📝 Gemini 專家核保意見")
+                st.write(analysis)
             else:
-                st.error("❌ 找到公司但無法獲取財報數據 (yfinance 暫時無回應)。")
-        else:
-            st.error(f"❌ 資料庫查無 '{user_query}'，請改輸入股票代碼試試看。")
+                st.error(analysis)
+    else:
+        st.warning("請先輸入公司名稱。")
+
+# 頁尾資訊
+st.markdown("---")
+st.caption("本系統數據由 Supabase 提供，AI 分析由 Google Gemini 1.5 Flash 驅動。")
