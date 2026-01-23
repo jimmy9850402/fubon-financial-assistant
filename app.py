@@ -7,35 +7,29 @@ import google.generativeai as genai
 # --- 1. 基礎連線設定 ---
 st.set_page_config(page_title="富邦產險 | 企業財報核保助手", layout="wide")
 
-# 配置您的金鑰
-SUPABASE_URL = "https://cemnzictjgunjyktrruc.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlbW56aWN0amd1bmp5a3RycnVjIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTA1MTU2MSwiZXhwIjoyMDg0NjI3NTYxfQ.LScr9qrJV7EcjTxp_f47r6-PLMsxz-mJTTblL4ZTmbs"
-GEMINI_API_KEY = "AIzaSyB2BKcuYjsr7LWhv9JTQcqOM-LvVKFEEVQ"
+# 建議使用 Streamlit Secrets 確保安全
+# 若在本地測試，請先在程式碼同層級建立 .streamlit/secrets.toml
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+except:
+    # 僅供緊急測試使用，請務必更換為您新申請的 Key
+    SUPABASE_URL = "https://cemnzictjgunjyktrruc.supabase.co"
+    SUPABASE_KEY = "您的新_SUPABASE_KEY" 
+    GEMINI_API_KEY = "您的新_GEMINI_API_KEY"
 
-# 清理 Key 以避免編碼報錯
+# 清理 Key 確保格式正確
 CLEAN_SUPABASE_KEY = SUPABASE_KEY.strip().encode('ascii', 'ignore').decode('ascii')
 supabase = create_client(SUPABASE_URL, CLEAN_SUPABASE_KEY)
 
-# 初始化 Google AI 並偵測可用模型
+# 初始化 Google AI
 genai.configure(api_key=GEMINI_API_KEY)
-
-def get_available_model():
-    """自動偵測目前 API Key 支援的模型名稱"""
-    try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                # 優先選擇 flash 模型，因為速度最快
-                if 'flash' in m.name:
-                    return m.name
-        # 若沒找到 flash，則回傳第一個支援的模型
-        return "models/gemini-1.5-flash" 
-    except:
-        return "models/gemini-1.5-flash"
 
 # --- 2. 輔助工具函數 ---
 
 def find_stock_code(query):
-    """從資料庫搜尋代碼"""
+    """資料庫搜尋代碼"""
     if query.isdigit(): return f"{query}.TW"
     try:
         res = supabase.table("stock_isin_list").select("code, name").ilike("name", f"%{query}%").execute()
@@ -49,10 +43,11 @@ def fetch_analysis_report(symbol):
     """抓取 5 季財報數據"""
     try:
         ticker = yf.Ticker(symbol)
-        q_inc, q_bal, q_cf = ticker.quarterly_financials, ticker.quarterly_balance_sheet, ticker.quarterly_cashflow
+        q_inc = ticker.quarterly_financials
+        q_bal = ticker.quarterly_balance_sheet
         if q_inc.empty: return None
 
-        metrics = ["營業收入", "總資產", "負債比", "營業活動淨現金流"]
+        metrics = ["營業收入", "總資產", "負債比"]
         result_df = pd.DataFrame({"項目": metrics})
 
         for col in q_inc.columns[:5]:
@@ -60,60 +55,42 @@ def fetch_analysis_report(symbol):
             rev = q_inc.loc["Total Revenue", col] if "Total Revenue" in q_inc.index else 0
             assets = q_bal.loc["Total Assets", col] if "Total Assets" in q_bal.index else 0
             liab = q_bal.loc["Total Liabilities Net Minority Interest", col] if "Total Liabilities Net Minority Interest" in q_bal.index else 0
-            ocf = q_cf.loc["Operating Cash Flow", col] if "Operating Cash Flow" in q_cf.index else 0
             d_ratio = (liab/assets)*100 if assets > 0 else 0
-            result_df[label] = [rev, assets, d_ratio, ocf]
+            result_df[label] = [rev, assets, d_ratio]
         return result_df
     except: return None
 
 def get_ai_opinion(company_name, report_df):
-    """呼叫 Gemini 進行核保診斷"""
+    """動態偵測並呼叫 AI 模型"""
     latest_col = report_df.columns[1] 
     latest_data = report_df[latest_col].values
     
-    prompt = f"""
-    你是一位富邦產險的 D&O 核保專家。請分析【{company_name}】最新財報：
-    - 負債比率：{latest_data[2]:.2f}% (警示線 65%)
-    - 營業活動現金流：{latest_data[3]:,.0f}
-    請給予專業的承保建議。
-    """
+    prompt = f"你是一位核保專家。評估【{company_name}】最新負債比：{latest_data[2]:.2f}%。請給予簡短建議。"
     
+    # 自動偵測可用的模型名稱
     try:
-        model_name = get_available_model() # 動態獲取模型
-        model = genai.GenerativeModel(model_name)
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        target_model = models[0] if models else "models/gemini-1.5-flash"
+        
+        model = genai.GenerativeModel(target_model)
         response = model.generate_content(prompt)
-        return f"(使用模型: {model_name})\n\n" + response.text
+        return response.text
     except Exception as e:
-        return f"❌ AI 診斷失敗。錯誤訊息：{str(e)}"
+        return f"❌ AI 分析失敗。請檢查 API Key 是否已更換。錯誤：{str(e)}"
 
 # --- 3. UI 介面設計 ---
 st.title("🛡️ 富邦產險 - 企業財報核保助手")
 
-with st.sidebar:
-    st.header("🔍 數據檢索")
-    user_query = st.text_input("輸入公司名稱或代碼", value="旺宏")
-    search_btn = st.button("🚀 生成報告與 AI 分析")
-
-if search_btn and user_query:
-    with st.spinner(f"正在分析 '{user_query}' 並調用 AI 模型..."):
+user_query = st.text_input("輸入公司名稱 (例如: 旺宏)", value="旺宏")
+if st.button("🚀 執行核保評估"):
+    with st.spinner("正在進行 AI 診斷..."):
         target_symbol = find_stock_code(user_query)
         if target_symbol:
             report = fetch_analysis_report(target_symbol)
             if report is not None:
-                st.success(f"標的確認: {user_query} ({target_symbol})")
-                
-                # 數據顯示美化
-                display_df = report.copy()
-                for col in display_df.columns[1:]:
-                    display_df[col] = display_df.apply(lambda x: f"{x[col]:,.2f}%" if x['項目'] == "負債比" else f"{x[col]:,.0f}", axis=1)
-                st.dataframe(display_df, use_container_width=True)
-                
-                # AI 分析區塊
+                st.dataframe(report, use_container_width=True)
                 st.markdown("---")
-                st.subheader("🤖 Gemini 專家診斷意見")
-                opinion = get_ai_opinion(user_query, report)
-                st.info(opinion)
+                st.subheader("🤖 Gemini 專家建議")
+                st.info(get_ai_opinion(user_query, report))
             else:
-                st.error("無法抓取數據。")
-        else:
-            st.error("查無標的。")
+                st.error("獲取數據失敗。")
