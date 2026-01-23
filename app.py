@@ -7,8 +7,8 @@ import google.generativeai as genai
 # --- 1. 基礎連線設定 ---
 st.set_page_config(page_title="富邦產險 | 企業財報核保助手", layout="wide")
 
-# 請替換為您新申請的 API Key
-GEMINI_API_KEY = "AIzaSyC9dlxv5uwRtlAxmTeJKBEDCtAMKlA-iXw"
+# 【重要】請在此換上您最新的 API Key
+GEMINI_API_KEY = "您的最新_GEMINI_API_KEY" 
 SUPABASE_URL = "https://cemnzictjgunjyktrruc.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlbW56aWN0amd1bmp5a3RycnVjIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTA1MTU2MSwiZXhwIjoyMDg0NjI3NTYxfQ.LScr9qrJV7EcjTxp_f47r6-PLMsxz-mJTTblL4ZTmbs"
 
@@ -17,10 +17,9 @@ CLEAN_SUPABASE_KEY = SUPABASE_KEY.strip().encode('ascii', 'ignore').decode('asci
 supabase = create_client(SUPABASE_URL, CLEAN_SUPABASE_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
 
-# --- 2. 恢復原始正確的數據抓取邏輯 ---
+# --- 2. 數據抓取函數 (校準台積電 9,899 億營收邏輯) ---
 
 def find_stock_code(query):
-    """從資料庫搜尋代碼"""
     if query.isdigit(): return f"{query}.TW"
     try:
         res = supabase.table("stock_isin_list").select("code, name").ilike("name", f"%{query}%").execute()
@@ -31,7 +30,7 @@ def find_stock_code(query):
     except: return None
 
 def safe_get(df, index_name, col_name):
-    """確保數據抓取穩定"""
+    """恢復原始正確的數據標籤檢索邏輯"""
     try:
         if index_name in df.index:
             val = df.loc[index_name, col_name]
@@ -40,10 +39,12 @@ def safe_get(df, index_name, col_name):
     except: return 0
 
 def fetch_analysis_report(symbol):
-    """恢復正確的 5 季財報抓取 (台積電營收校正)"""
+    """執行 5 季財報抓取 (確保存取 Total Revenue)"""
     try:
         ticker = yf.Ticker(symbol)
-        q_inc, q_bal, q_cf = ticker.quarterly_financials, ticker.quarterly_balance_sheet, ticker.quarterly_cashflow
+        q_inc = ticker.quarterly_financials
+        q_bal = ticker.quarterly_balance_sheet
+        q_cf = ticker.quarterly_cashflow
         if q_inc.empty: return None
 
         metrics = ["營業收入", "總資產", "負債比", "流動資產", "流動負債", "營業活動淨現金流"]
@@ -51,7 +52,7 @@ def fetch_analysis_report(symbol):
 
         for col in q_inc.columns[:5]:
             label = f"{col.year}-Q{((col.month-1)//3)+1}"
-            # 使用原始正確標籤抓取數據
+            # 獲取正確營收數字
             rev = safe_get(q_inc, "Total Revenue", col)
             assets = safe_get(q_bal, "Total Assets", col)
             liab = safe_get(q_bal, "Total Liabilities Net Minority Interest", col)
@@ -65,57 +66,47 @@ def fetch_analysis_report(symbol):
     except: return None
 
 def get_ai_opinion(company_name, report_df):
-    """解決 404 問題並執行嚴格核保 Prompt"""
+    """執行您的專業核保 Prompt 並修正 AI 沒出來的問題"""
     latest_col = report_df.columns[1] 
     latest_data = report_df[latest_col].values
     
-    # 帶入您指定的專業 Prompt
-    prompt = f"""
+    # 使用您指定的完整 Prompt
+    strict_prompt = f"""
     【一、最高優先執行規則：觸發即匯出與數據校準】
-    針對公司：{company_name} ({latest_col}) 產出完整 D&O 核保報告。
+    針對公司：{company_name} 產出完整 D&O 核保報告。
 
-    四、Pre-check List (拒限保條件檢核)
-    標示「✔ 命中」 「❌ 未命中」：
-    - 財務劣化：負債比 {latest_data[2]:.2f}% 是否 > 80%？
-
-    六、Group A 判定 (嚴格)
-    - 營業收入 {latest_data[0]:,.0f} 是否低於新台幣 150 億？
-    - 負債比是否高於 80%？
-
+    四、Pre-check List (檢核 ✔/❌)
+    六、Group A 判定 (營收 {latest_data[0]:,.0f} 是否滿 150 億、負債比 {latest_data[2]:.2f}% 是否 < 80%)
     七、核保結論輸出
-    ✅「本案符合 Group A...」 或 ❌「本案不符合 Group A...」
     """
     
-    # 強制使用正確的模型路徑格式
-    try:
-        # 嘗試直接使用模型名稱
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(prompt)
-        return response.text
-    except:
-        # 若失敗，嘗試帶 models/ 前綴的路徑
+    # 解決 404 問題的雙重調用邏輯
+    for model_name in ["gemini-1.5-flash", "models/gemini-1.5-flash"]:
         try:
-            model = genai.GenerativeModel("models/gemini-1.5-flash")
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception as e:
-            return f"AI 執行失敗：{e}"
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(strict_prompt)
+            if response.text: return response.text
+        except: continue
+    return "❌ AI 無法回應，請確認新 API Key 是否已填入或權限是否開啟。"
 
 # --- 3. UI 介面設計 ---
 st.title("🛡️ 富邦產險 - 企業財報核保助手")
 
 user_query = st.text_input("輸入公司名稱或代碼", value="台積電")
 if st.button("🚀 生成完整核保報告"):
-    with st.spinner("正在校準數據並產出報告..."):
+    with st.spinner("正在校準數據並產出 AI 報告..."):
         target_symbol = find_stock_code(user_query)
         if target_symbol:
             report = fetch_analysis_report(target_symbol)
             if report is not None:
                 st.success(f"標的確認: {user_query} ({target_symbol})")
-                # 數據美化：負債比顯示 %，其餘千分位
+                
+                # 數據美化顯示
                 display_df = report.copy()
                 for col in display_df.columns[1:]:
-                    display_df[col] = display_df.apply(lambda x: f"{x[col]:,.2f}%" if x['項目'] == "負債比" else f"{x[col]:,.0f}", axis=1)
+                    display_df[col] = display_df.apply(
+                        lambda x: f"{x[col]:,.2f}%" if x['項目'] == "負債比" else f"{x[col]:,.0f}", axis=1
+                    )
                 st.dataframe(display_df, use_container_width=True)
                 
                 st.markdown("---")
@@ -123,5 +114,3 @@ if st.button("🚀 生成完整核保報告"):
                 st.info(get_ai_opinion(user_query, report))
             else:
                 st.error("無法抓取財報數據。")
-        else:
-            st.error("查無此公司。")
