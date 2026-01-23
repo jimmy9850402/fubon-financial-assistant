@@ -5,7 +5,7 @@ import pandas as pd
 
 # --- 1. 基礎設定 (請替換為您的實際連線資訊) ---
 SUPABASE_URL = "https://cemnzictjgunjyktrruc.supabase.co"
-SUPABASE_KEY = "您的_SUPABASE_ANON_KEY" # 請填入您的 Supabase Key
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlbW56aWN0amd1bmp5a3RycnVjIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTA1MTU2MSwiZXhwIjoyMDg0NjI3NTYxfQ.LScr9qrJV7EcjTxp_f47r6-PLMsxz-mJTTblL4ZTmbs" # 請填入您的 Supabase Key
 GEMINI_API_KEY = "AIzaSyB2BKcuYjsr7LWhv9JTQcqOM-LvVKFEEVQ"
 
 # 初始化客戶端
