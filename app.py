@@ -2,22 +2,22 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from supabase import create_client
-import google.generativeai as genai
+from openai import OpenAI  # 匯入 OpenAI 客戶端
 
 # --- 1. 基礎連線設定 ---
 st.set_page_config(page_title="富邦產險 | 企業財報核保助手", layout="wide")
 
-# API 金鑰設定
+# 配置金鑰 (請確保 Key 正確，建議正式環境使用 st.secrets)
 SUPABASE_URL = "https://cemnzictjgunjyktrruc.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlbW56aWN0amd1bmp5a3RycnVjIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTA1MTU2MSwiZXhwIjoyMDg0NjI3NTYxfQ.LScr9qrJV7EcjTxp_f47r6-PLMsxz-mJTTblL4ZTmbs"
-GEMINI_API_KEY = "AIzaSyB2BKcuYjsr7LWhv9JTQcqOM-LvVKFEEVQ"
+OPENAI_API_KEY = "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"
 
-# 清理 Key 以避免編碼報錯
+# 清理 Supabase Key 以避免 UnicodeEncodeError
 CLEAN_SUPABASE_KEY = SUPABASE_KEY.strip().encode('ascii', 'ignore').decode('ascii')
 supabase = create_client(SUPABASE_URL, CLEAN_SUPABASE_KEY)
 
-# 初始化 Gemini
-genai.configure(api_key=GEMINI_API_KEY)
+# 初始化 OpenAI 客戶端
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # --- 2. 輔助工具函數 ---
 
@@ -32,21 +32,16 @@ def find_stock_code(query):
                 if item['name'] == query:
                     return f"{item['code']}.TW"
             return f"{res.data[0]['code']}.TW"
-    except Exception as e:
-        st.error(f"資料庫查詢異常: {e}")
-    return None
+    except: return None
 
 def fetch_analysis_report(symbol):
-    """抓取 5 季財報數據"""
+    """抓取財報數據"""
     try:
         ticker = yf.Ticker(symbol)
-        q_inc = ticker.quarterly_financials
-        q_bal = ticker.quarterly_balance_sheet
-        q_cf = ticker.quarterly_cashflow
-
+        q_inc, q_bal, q_cf = ticker.quarterly_financials, ticker.quarterly_balance_sheet, ticker.quarterly_cashflow
         if q_inc.empty: return None
 
-        metrics = ["營業收入", "總資產", "負債比", "流動資產", "流動負債", "營業活動淨現金流"]
+        metrics = ["營業收入", "總資產", "負債比", "營業活動淨現金流"]
         result_df = pd.DataFrame({"項目": metrics})
 
         for col in q_inc.columns[:5]:
@@ -54,58 +49,62 @@ def fetch_analysis_report(symbol):
             rev = q_inc.loc["Total Revenue", col] if "Total Revenue" in q_inc.index else 0
             assets = q_bal.loc["Total Assets", col] if "Total Assets" in q_bal.index else 0
             liab = q_bal.loc["Total Liabilities Net Minority Interest", col] if "Total Liabilities Net Minority Interest" in q_bal.index else 0
-            # 負債比計算
+            ocf = q_cf.loc["Operating Cash Flow", col] if "Operating Cash Flow" in q_cf.index else 0
             d_ratio = (liab/assets)*100 if assets > 0 else 0
-            
-            result_df[label] = [rev, assets, d_ratio, 0, 0, 0] # 簡化示範，其餘設為 0
+            result_df[label] = [rev, assets, d_ratio, ocf]
         return result_df
     except: return None
 
 def get_ai_opinion(company_name, report_df):
-    """修正 404 錯誤：動態嘗試模型名稱"""
+    """呼叫 OpenAI GPT-4o 進行核保診斷"""
     latest_col = report_df.columns[1] 
     latest_data = report_df[latest_col].values
     
-    prompt = f"你是一位核保專家。分析【{company_name}】最新負債比：{latest_data[2]:.2f}%。請給予建議。"
-    
-    # 嘗試不同的模型名稱路徑
-    model_names = ['gemini-1.5-flash', 'models/gemini-1.5-flash', 'gemini-pro']
-    
-    for name in model_names:
-        try:
-            model = genai.GenerativeModel(name)
-            response = model.generate_content(prompt)
-            return response.text
-        except:
-            continue
-    return "❌ 所有 AI 模型呼叫均失敗，請檢查 API Key 權限或網路連線。"
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",  # 使用最穩定的 GPT-4o 模型
+            messages=[
+                {"role": "system", "content": "你是一位富邦產險的 D&O (董監事責任險) 核保專家。"},
+                {"role": "user", "content": f"""
+                    請評估【{company_name}】最新財報數據的風險：
+                    - 負債比率：{latest_data[2]:.2f}% (預警線 65%)
+                    - 營業活動現金流：{latest_data[3]:,.0f}
+                    請針對財務穩健度提供專業的承保建議。
+                """}
+            ]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"❌ OpenAI 呼叫失敗: {e}"
 
 # --- 3. UI 介面設計 ---
-st.title("🛡️ 富邦產險 - 企業財報核保助手")
+st.title("🛡️ 富邦產險 - 企業財報核保助手 (OpenAI 版)")
 
 with st.sidebar:
     st.header("🔍 數據檢索")
-    user_query = st.text_input("輸入公司名稱", value="旺宏")
-    search_btn = st.button("🚀 生成核保報告")
+    user_query = st.text_input("輸入公司名稱或代碼", value="旺宏")
+    search_btn = st.button("🚀 生成報告與 AI 分析")
 
 if search_btn and user_query:
-    with st.spinner(f"分析中..."):
+    with st.spinner(f"正在串接 OpenAI 解析 '{user_query}' 數據..."):
         target_symbol = find_stock_code(user_query)
         if target_symbol:
             report = fetch_analysis_report(target_symbol)
             if report is not None:
-                st.success(f"標的: {user_query} ({target_symbol})")
+                st.success(f"標的確認: {user_query} ({target_symbol})")
                 
-                # 數據格式化
+                # 資料顯示格式化
                 display_df = report.copy()
+                for col in display_df.columns[1:]:
+                    display_df[col] = display_df.apply(lambda x: f"{x[col]:,.2f}%" if x['項目'] == "負債比" else f"{x[col]:,.0f}", axis=1)
                 st.dataframe(display_df, use_container_width=True)
                 
                 # AI 分析區塊
                 st.markdown("---")
-                st.subheader("🤖 AI 專家診斷意見")
+                st.subheader("🤖 GPT-4o 核保專家診斷")
                 opinion = get_ai_opinion(user_query, report)
                 st.info(opinion)
             else:
-                st.error("無法獲取財報。")
+                st.error("無法抓取財報數據。")
         else:
-            st.error("查無此公司。")
+            st.error("查無此公司名稱或代碼。")
