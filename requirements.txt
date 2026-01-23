@@ -5,3 +5,4 @@ lxml
 html5lib
 supabase
 yfinance
+google-generativeai
