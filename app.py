@@ -16,8 +16,21 @@ GEMINI_API_KEY = "AIzaSyB2BKcuYjsr7LWhv9JTQcqOM-LvVKFEEVQ"
 CLEAN_SUPABASE_KEY = SUPABASE_KEY.strip().encode('ascii', 'ignore').decode('ascii')
 supabase = create_client(SUPABASE_URL, CLEAN_SUPABASE_KEY)
 
-# 初始化 Google AI
+# 初始化 Google AI 並偵測可用模型
 genai.configure(api_key=GEMINI_API_KEY)
+
+def get_available_model():
+    """自動偵測目前 API Key 支援的模型名稱"""
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                # 優先選擇 flash 模型，因為速度最快
+                if 'flash' in m.name:
+                    return m.name
+        # 若沒找到 flash，則回傳第一個支援的模型
+        return "models/gemini-1.5-flash" 
+    except:
+        return "models/gemini-1.5-flash"
 
 # --- 2. 輔助工具函數 ---
 
@@ -54,7 +67,7 @@ def fetch_analysis_report(symbol):
     except: return None
 
 def get_ai_opinion(company_name, report_df):
-    """呼叫 Gemini 進行核保診斷 (包含 404 自動修復邏輯)"""
+    """呼叫 Gemini 進行核保診斷"""
     latest_col = report_df.columns[1] 
     latest_data = report_df[latest_col].values
     
@@ -65,20 +78,16 @@ def get_ai_opinion(company_name, report_df):
     請給予專業的承保建議。
     """
     
-    # 嘗試多個可能的模型路徑，解決不同 SDK 版本的相容問題
-    model_paths = ["models/gemini-1.5-flash", "gemini-1.5-flash", "models/gemini-pro"]
-    
-    for path in model_paths:
-        try:
-            model = genai.GenerativeModel(path)
-            response = model.generate_content(prompt)
-            return response.text
-        except:
-            continue
-    return "❌ 所有 Gemini 模型路徑均失效。請檢查 API Key 權限或更新 google-generativeai 套件。"
+    try:
+        model_name = get_available_model() # 動態獲取模型
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(prompt)
+        return f"(使用模型: {model_name})\n\n" + response.text
+    except Exception as e:
+        return f"❌ AI 診斷失敗。錯誤訊息：{str(e)}"
 
 # --- 3. UI 介面設計 ---
-st.title("🛡️ 富邦產險 - 企業財報核保助手 (Gemini 版)")
+st.title("🛡️ 富邦產險 - 企業財報核保助手")
 
 with st.sidebar:
     st.header("🔍 數據檢索")
@@ -86,14 +95,14 @@ with st.sidebar:
     search_btn = st.button("🚀 生成報告與 AI 分析")
 
 if search_btn and user_query:
-    with st.spinner(f"正在連線 Gemini 並分析 '{user_query}'..."):
+    with st.spinner(f"正在分析 '{user_query}' 並調用 AI 模型..."):
         target_symbol = find_stock_code(user_query)
         if target_symbol:
             report = fetch_analysis_report(target_symbol)
             if report is not None:
                 st.success(f"標的確認: {user_query} ({target_symbol})")
                 
-                # 數據美化
+                # 數據顯示美化
                 display_df = report.copy()
                 for col in display_df.columns[1:]:
                     display_df[col] = display_df.apply(lambda x: f"{x[col]:,.2f}%" if x['項目'] == "負債比" else f"{x[col]:,.0f}", axis=1)
